@@ -1,0 +1,16 @@
+---
+- name: Wait for all nodes to be Ready
+  hosts: k8s_master
+  become: true
+  tasks:
+    - name: Wait until all expected nodes report Ready
+      ansible.builtin.command: kubectl get nodes --no-headers
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: nodes_status
+      changed_when: false
+      retries: 30
+      delay: 10
+      until:
+        - nodes_status.stdout_lines | length >= 3
+        - nodes_status.stdout_lines | select('search', ' Ready ') | list | length >= 3

@@ -1,0 +1,112 @@
+---
+- name: Install and configure tools VM services
+  hosts: k8s_tools
+  become: true
+  tasks:
+    - name: Install Docker and NFS packages
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - nfs-kernel-server
+        state: present
+        update_cache: true
+
+    - name: Ensure docker service is enabled and running
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Ensure nfs-kernel-server service is enabled and running
+      ansible.builtin.systemd:
+        name: nfs-kernel-server
+        state: started
+        enabled: true
+
+    - name: Add vagrant user to docker group
+      ansible.builtin.user:
+        name: vagrant
+        groups: docker
+        append: true
+
+    - name: Create NFS export directory
+      ansible.builtin.file:
+        path: /srv/nfs/share
+        state: directory
+        owner: nobody
+        group: nogroup
+        mode: '0777'
+
+    - name: Configure NFS export
+      ansible.builtin.lineinfile:
+        path: /etc/exports
+        line: "/srv/nfs/share 192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)"
+        create: true
+      register: nfs_export
+
+    - name: Reload NFS exports
+      ansible.builtin.command: exportfs -ra
+      changed_when: false
+      when: nfs_export.changed
+
+    - name: Create Gitea data directory
+      ansible.builtin.file:
+        path: /opt/tools/gitea
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+
+    - name: Create Nexus data directory
+      ansible.builtin.file:
+        path: /opt/tools/nexus/data
+        state: directory
+        owner: '200'
+        group: '200'
+        mode: '0755'
+        recurse: true
+
+    - name: Check if Gitea container exists
+      ansible.builtin.command: docker container inspect gitea
+      register: gitea_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Run Gitea container
+      ansible.builtin.command: >-
+        docker run -d --name gitea
+        --restart unless-stopped
+        -p 3000:3000 -p 2222:22
+        -v /opt/tools/gitea:/data
+        gitea/gitea:latest
+      when: gitea_exists.rc != 0
+
+    - name: Ensure Gitea container is running
+      ansible.builtin.command: docker start gitea
+      register: gitea_start
+      failed_when: false
+      changed_when: "'gitea' in gitea_start.stdout"
+      when: gitea_exists.rc == 0
+
+    - name: Check if Nexus container exists
+      ansible.builtin.command: docker container inspect nexus
+      register: nexus_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Run Nexus container
+      ansible.builtin.command: >-
+        docker run -d --name nexus
+        --restart unless-stopped
+        -p 8081:8081
+        -e INSTALL4J_ADD_VM_PARAMS="-Xms512m -Xmx1024m"
+        -v /opt/tools/nexus/data:/nexus-data
+        sonatype/nexus3:3.68.1
+      when: nexus_exists.rc != 0
+
+    - name: Ensure Nexus container is running
+      ansible.builtin.command: docker start nexus
+      register: nexus_start
+      failed_when: false
+      changed_when: "'nexus' in nexus_start.stdout"
+      when: nexus_exists.rc == 0

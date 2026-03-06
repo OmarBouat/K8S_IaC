@@ -1,0 +1,6 @@
+---
+- import_playbook: cluster/01-prepare.yml
+- import_playbook: cluster/02-init-master.yml
+- import_playbook: cluster/03-join-workers.yml
+- import_playbook: cluster/04-wait-ready.yml
+- import_playbook: cluster/05-tools-services.yml
