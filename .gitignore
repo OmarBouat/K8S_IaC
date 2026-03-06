@@ -1,0 +1,48 @@
+# Vagrant
+.vagrant/
+*.box
+vagrant.log
+
+# Ansible
+*.retry
+ansible.log
+.ansible/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*~
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.bak
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# SSH keys (if accidentally placed in project)
+*.pem
+*.key
+id_rsa*
+*.ppk
