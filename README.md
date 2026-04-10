@@ -14,13 +14,17 @@ This project creates **4 Ubuntu Server VMs (headless on VirtualBox)**:
 
 # Kubernetes Lab with Vagrant + Ansible
 
-A complete, production-ready infrastructure-as-code setup that creates a **4-node Kubernetes cluster** (1 control-plane, 2 workers) plus a dedicated tools VM with **Gitea**, **Nexus**, and **NFS** for a complete DevOps environment.
+A complete, production-ready infrastructure-as-code setup that creates a **4-node Kubernetes cluster** (1 control-plane, 2 workers) plus a dedicated tools VM with **Jenkins**, **Gitea**, **Nexus**, and **NFS** for a complete DevOps environment.
 
 ## Features
 
 - **4 HeadlessUbuntu Server VMs** on VirtualBox with private networking
 - **Kubernetes v1.29** with containerd and Flannel CNI
 - **Docker Engine** on tools VM for containerized services
+- **Dockerfiles + Compose** for Jenkins/Gitea/Nexus image and runtime definitions
+- **Jenkins**: CI/CD automation server
+- **Jenkinsfile pipeline** to auto-build and redeploy frontend container on code changes
+- Jenkins image includes the Docker CLI and host socket access for container builds
 - **Gitea**: Self-hosted Git repository server
 - **Nexus**: Artifact repository manager (Maven, Docker, npm, etc.)
 - **NFS**: Network file system for persistent shared storage
@@ -64,6 +68,18 @@ make status            # Show VM status
 make rerun             # Re-run Ansible playbook without VM changes
 make deploy            # Shortcut for 'up && rerun'
 
+# Docker Services (tools VM)
+make docker-build      # Build Jenkins/Gitea/Nexus images from docker/*/Dockerfile
+make docker-up         # Start/update services via docker compose
+make docker-down       # Stop/remove services defined in compose
+make docker-ps         # Show compose service status
+
+# Frontend Demo App
+make frontend-build    # Build frontend image manually (optional)
+make frontend-deploy   # Deploy frontend container manually (optional)
+make frontend-health   # Check frontend health endpoint
+make frontend-logs     # Show frontend container logs
+
 # SSH Access
 make ssh-master        # SSH into master node
 make ssh-worker1       # SSH into worker1 node
@@ -72,10 +88,11 @@ make ssh-tools         # SSH into tools VM
 
 # Diagnostics & Testing
 make test-connectivity # Ping all nodes from tools VM
-make test-services     # Check Gitea, Nexus, NFS reachability
+make test-services     # Check Jenkins, Gitea, Nexus, frontend, NFS reachability
 make test-k8s          # Verify Kubernetes cluster health
 
 # Logs
+make logs-jenkins      # Show Jenkins container logs
 make logs-gitea        # Show Gitea container logs
 make logs-nexus        # Show Nexus container logs
 make logs-docker       # Show all Docker container logs
@@ -103,6 +120,12 @@ cd /vagrant/ansible
 ansible-playbook playbooks/site.yml
 ```
 
+Docker services are defined in source-controlled files under `docker/` and are deployed with:
+
+```bash
+make docker-up
+```
+
 ## Cluster Architecture
 
 | Node | Hostname | IP | Role |
@@ -118,8 +141,10 @@ All services run on the `tools` VM (`192.168.56.20`):
 
 | Service | Port | URL | Purpose |
 |---------|------|-----|---------|
+| **Jenkins** | 8080 | `http://192.168.56.20:8080` | CI/CD server (pipelines, agents, jobs) |
 | **Gitea** | 3000 | `http://192.168.56.20:3000` | Git repository server |
 | **Nexus** | 8081 | `http://192.168.56.20:8081` | Package/artifact repository |
+| **Frontend Demo** | 8090 | `http://192.168.56.20:8090` | Auto-redeployed demo website |
 | **NFS** | 2049 | `nfs://192.168.56.20:/srv/nfs/share` | Persistent shared storage |
 | **Docker** | 2375 | Via unix socket | Container runtime |
 
@@ -131,9 +156,10 @@ Ansible playbooks are modular under `ansible/playbooks/cluster/`:
 - **02-init-master.yml**: Control plane initialization (kubeadm init, Flannel CNI)
 - **03-join-workers.yml**: Worker node join (kubeadm join)
 - **04-wait-ready.yml**: Wait for cluster readiness
-- **05-tools-services.yml**: Tools VM setup (Docker, NFS, Gitea, Nexus)
+- **05-tools-services.yml**: Tools VM setup (Docker, NFS, Jenkins, Gitea, Nexus)
+- **06-nfs-clients.yml**: NFS client setup and mount on cluster nodes
 
-`site.yml` orchestrates all 5 playbooks in sequence.
+`site.yml` orchestrates all 6 playbooks in sequence.
 
 ## Project Structure
 
@@ -141,13 +167,29 @@ Ansible playbooks are modular under `ansible/playbooks/cluster/`:
 .
 ├── Vagrantfile              # VM definitions (4 VMs with specs)
 ├── Makefile                 # One-command management targets
+├── Jenkinsfile              # CI/CD pipeline definition (build + redeploy frontend)
 ├── README.md                # This file
+├── frontend/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── index.html
+│   ├── styles.css
+│   └── app.js
 ├── scripts/
 │   ├── bootstrap.sh         # Base OS setup (all VMs)
 │   └── setup-tools.sh       # Tools VM Ansible prep
+├── docker/
+│   ├── docker-compose.tools.yml  # Compose stack for Jenkins + Gitea + Nexus
+│   ├── jenkins/
+│   │   ├── Dockerfile
+│   │   └── plugins.txt
+│   ├── gitea/
+│   │   └── Dockerfile
+│   └── nexus/
+│       └── Dockerfile
 ├── ansible/
 │   ├── ansible.cfg          # Ansible global config
-│   ├── inventory.ini        # Static inventory with SSH keys
+│   ├── inventory.ini        # Static inventory using shared VM SSH key
 │   └── playbooks/
 │       ├── site.yml         # Main orchestration playbook
 │       └── cluster/
@@ -155,7 +197,8 @@ Ansible playbooks are modular under `ansible/playbooks/cluster/`:
 │           ├── 02-init-master.yml
 │           ├── 03-join-workers.yml
 │           ├── 04-wait-ready.yml
-│           └── 05-tools-services.yml
+│           ├── 05-tools-services.yml
+│           └── 06-nfs-clients.yml
 ```
 
 ## Common Workflows
@@ -176,6 +219,8 @@ make ssh-worker2    # Worker 2
 make ssh-tools      # DevOps tools
 ```
 
+All VMs are provisioned with one shared inter-VM SSH key, so the `vagrant` user can SSH between `master`, `worker1`, `worker2`, and `tools` without passwords.
+
 Example from master:
 
 ```bash
@@ -188,11 +233,11 @@ kubectl get pods -A
 
 ```bash
 vagrant ssh worker1
-sudo apt-get install nfs-common
-sudo mkdir -p /mnt/nfs
-sudo mount -t nfs 192.168.56.20:/srv/nfs/share /mnt/nfs
+mount | grep /mnt/nfs
 ls -la /mnt/nfs  # Shared storage accessible
 ```
+
+NFS clients are automatically configured on cluster nodes (`master`, `worker1`, `worker2`) by Ansible, including persistent `/etc/fstab` mount entries.
 
 ### Access Gitea
 
@@ -205,6 +250,47 @@ ls -la /mnt/nfs  # Shared storage accessible
 1. Open browser: `http://192.168.56.20:8081`
 2. Default login: `admin` / check logs for password: `make logs-nexus`
 3. Configure repositories and proxy external registries
+
+### Access Jenkins
+
+1. Open browser: `http://192.168.56.20:8080`
+2. Get the initial admin password: `make logs-jenkins`
+3. Complete setup wizard and create your first pipeline job
+
+## Frontend CI/CD with Jenkins (GitHub Push -> Auto Redeploy)
+
+This repository includes:
+
+- `frontend/`: simple static website
+- `frontend/Dockerfile`: image definition
+- `Jenkinsfile`: pipeline that builds and redeploys container `frontend-web` on port `8090`
+
+### Pipeline behavior
+
+On each detected commit/push:
+
+1. Checkout repository
+2. Build `k8s-lab/frontend:latest` and `k8s-lab/frontend:<short_sha>`
+3. Replace running `frontend-web` container
+4. Run a health check against `http://127.0.0.1:8090/health`
+
+### Jenkins job setup (one-time)
+
+1. In Jenkins, create a **Pipeline** job.
+2. Choose **Pipeline script from SCM**.
+3. SCM: **Git**
+4. Repository URL: your GitHub repository URL.
+5. Script Path: `Jenkinsfile`
+6. Save and run once.
+
+### Auto-trigger from GitHub
+
+Use either option:
+
+- Preferred: add GitHub webhook to `http://<JENKINS_HOST>:8080/github-webhook/`
+- Fallback: polling is already enabled in `Jenkinsfile` every ~2 minutes
+
+> Note: If Jenkins is not publicly reachable from GitHub, webhook delivery will fail and polling will still keep deployments automated.
 
 ### Redeploy just services
 
@@ -268,6 +354,19 @@ make test-connectivity
 
 # Or manually:
 vagrant ssh tools -c "cd /vagrant/ansible && ansible all -m ping"
+```
+
+### VM-to-VM SSH asks for password
+
+```bash
+# Re-apply bootstrap and SSH setup on all VMs
+vagrant provision
+
+# Quick checks from any VM
+ssh master hostname
+ssh worker1 hostname
+ssh worker2 hostname
+ssh tools hostname
 ```
 
 ### Kubernetes nodes stuck in NotReady

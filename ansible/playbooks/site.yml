@@ -4,3 +4,4 @@
 - import_playbook: cluster/03-join-workers.yml
 - import_playbook: cluster/04-wait-ready.yml
 - import_playbook: cluster/05-tools-services.yml
+- import_playbook: cluster/06-nfs-clients.yml

@@ -7,6 +7,7 @@
       ansible.builtin.apt:
         name:
           - docker.io
+          - docker-compose
           - nfs-kernel-server
         state: present
         update_cache: true
@@ -66,47 +67,37 @@
         mode: '0755'
         recurse: true
 
-    - name: Check if Gitea container exists
-      ansible.builtin.command: docker container inspect gitea
-      register: gitea_exists
-      failed_when: false
+    - name: Create Jenkins home directory
+      ansible.builtin.file:
+        path: /opt/tools/jenkins_home
+        state: directory
+        owner: '1000'
+        group: '1000'
+        mode: '0755'
+        recurse: true
+
+    - name: Detect available compose command
+      ansible.builtin.shell: |
+        if docker compose version >/dev/null 2>&1; then
+          echo "docker compose"
+        elif command -v docker-compose >/dev/null 2>&1; then
+          echo "docker-compose"
+        else
+          echo "No compose command found" >&2
+          exit 1
+        fi
+      register: compose_cmd
       changed_when: false
 
-    - name: Run Gitea container
-      ansible.builtin.command: >-
-        docker run -d --name gitea
-        --restart unless-stopped
-        -p 3000:3000 -p 2222:22
-        -v /opt/tools/gitea:/data
-        gitea/gitea:latest
-      when: gitea_exists.rc != 0
+    - name: Remove existing service containers to avoid name conflicts
+      ansible.builtin.shell: |
+        for c in jenkins gitea nexus; do
+          docker rm -f "$c" 2>/dev/null || true
+        done
+      register: removed_conflicts
+      changed_when: removed_conflicts.stdout | trim | length > 0
 
-    - name: Ensure Gitea container is running
-      ansible.builtin.command: docker start gitea
-      register: gitea_start
-      failed_when: false
-      changed_when: "'gitea' in gitea_start.stdout"
-      when: gitea_exists.rc == 0
-
-    - name: Check if Nexus container exists
-      ansible.builtin.command: docker container inspect nexus
-      register: nexus_exists
-      failed_when: false
-      changed_when: false
-
-    - name: Run Nexus container
-      ansible.builtin.command: >-
-        docker run -d --name nexus
-        --restart unless-stopped
-        -p 8081:8081
-        -e INSTALL4J_ADD_VM_PARAMS="-Xms512m -Xmx1024m"
-        -v /opt/tools/nexus/data:/nexus-data
-        sonatype/nexus3:3.68.1
-      when: nexus_exists.rc != 0
-
-    - name: Ensure Nexus container is running
-      ansible.builtin.command: docker start nexus
-      register: nexus_start
-      failed_when: false
-      changed_when: "'nexus' in nexus_start.stdout"
-      when: nexus_exists.rc == 0
+    - name: Build and start Docker services from compose definition
+      ansible.builtin.shell: "{{ compose_cmd.stdout }} -f /vagrant/docker/docker-compose.tools.yml up -d --build"
+      args:
+        chdir: /vagrant/docker

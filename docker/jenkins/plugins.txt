@@ -1,0 +1,9 @@
+workflow-aggregator
+git
+github
+docker-workflow
+kubernetes
+credentials-binding
+pipeline-stage-view
+ssh-agent
+ansicolor

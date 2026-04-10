@@ -10,16 +10,6 @@ mkdir -p /home/vagrant/.ssh
 chown -R vagrant:vagrant /home/vagrant/.ssh
 chmod 700 /home/vagrant/.ssh
 
-if [[ ! -f /home/vagrant/.ssh/config ]]; then
-  cat >/home/vagrant/.ssh/config <<'EOF'
-Host *
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-EOF
-  chown vagrant:vagrant /home/vagrant/.ssh/config
-  chmod 600 /home/vagrant/.ssh/config
-fi
-
 cat >/home/vagrant/.ansible.cfg <<'EOF'
 [defaults]
 inventory = /vagrant/ansible/inventory.ini
