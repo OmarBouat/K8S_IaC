@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>K8S IaC Frontend</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="hero">
+      <section class="card">
+        <p class="eyebrow">CI/CD Demo</p>
+        <h1>Frontend Deployed by Jenkins</h1>
+        <p>
+          This static site is built into a Docker image and redeployed automatically
+          from GitHub commits.
+        </p>
+        <div class="meta">
+          <span id="build-commit">Commit: unknown</span>
+          <span id="build-time">Built: unknown</span>
+        </div>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>
