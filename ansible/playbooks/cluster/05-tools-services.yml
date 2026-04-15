@@ -12,11 +12,29 @@
         state: present
         update_cache: true
 
+    - name: Configure Docker insecure registry for Nexus
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "insecure-registries": ["192.168.56.20:8082"]
+          }
+        owner: root
+        group: root
+        mode: '0644'
+      register: docker_daemon_config
+
     - name: Ensure docker service is enabled and running
       ansible.builtin.systemd:
         name: docker
         state: started
         enabled: true
+
+    - name: Restart Docker to apply registry configuration
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+      when: docker_daemon_config.changed
 
     - name: Ensure nfs-kernel-server service is enabled and running
       ansible.builtin.systemd:
@@ -101,3 +119,80 @@
       ansible.builtin.shell: "{{ compose_cmd.stdout }} -f /vagrant/docker/docker-compose.tools.yml up -d --build"
       args:
         chdir: /vagrant/docker
+
+    - name: Check whether host Docker auth config exists
+      ansible.builtin.stat:
+        path: /home/vagrant/.docker/config.json
+      register: host_docker_auth
+
+    - name: Ensure Jenkins Docker config directory exists
+      ansible.builtin.file:
+        path: /opt/tools/jenkins_home/.docker
+        state: directory
+        owner: '1000'
+        group: '1000'
+        mode: '0700'
+      when: host_docker_auth.stat.exists
+
+    - name: Copy host Docker auth config to Jenkins home
+      ansible.builtin.copy:
+        src: /home/vagrant/.docker/config.json
+        dest: /opt/tools/jenkins_home/.docker/config.json
+        remote_src: true
+        owner: '1000'
+        group: '1000'
+        mode: '0600'
+      when: host_docker_auth.stat.exists
+
+    - name: Check whether the Nexus Docker repository is already configured
+      ansible.builtin.stat:
+        path: /opt/tools/nexus/data/.frontend-docker-hosted-created
+      register: nexus_repo_marker
+
+    - name: Wait for Nexus to become available
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8081
+        status_code: [200, 302]
+      register: nexus_ready
+      retries: 30
+      delay: 10
+      until: nexus_ready.status in [200, 302]
+      when: not nexus_repo_marker.stat.exists
+
+    - name: Read Nexus admin password
+      ansible.builtin.slurp:
+        src: /opt/tools/nexus/data/admin.password
+      register: nexus_admin_password
+      when: not nexus_repo_marker.stat.exists
+
+    - name: Create Docker hosted repository for frontend images
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8081/service/rest/v1/repositories/docker/hosted
+        method: POST
+        user: admin
+        password: "{{ nexus_admin_password.content | b64decode | trim }}"
+        force_basic_auth: true
+        body_format: json
+        headers:
+          Content-Type: application/json
+        body:
+          name: frontend-docker-hosted
+          online: true
+          storage:
+            blobStoreName: default
+            strictContentTypeValidation: true
+            writePolicy: ALLOW
+          docker:
+            v1Enabled: false
+            forceBasicAuth: true
+            httpPort: 8082
+        status_code: [201, 204, 409]
+      failed_when: false
+      register: nexus_repo_create
+      when: not nexus_repo_marker.stat.exists
+
+    - name: Mark the Nexus Docker repository as configured
+      ansible.builtin.file:
+        path: /opt/tools/nexus/data/.frontend-docker-hosted-created
+        state: touch
+      when: not nexus_repo_marker.stat.exists and (nexus_repo_create is not defined or nexus_repo_create.status in [201, 204, 409, 400])

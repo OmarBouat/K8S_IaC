@@ -6,6 +6,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends docker-cli docker.io curl \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -g 119 dockersock \
+    && usermod -aG dockersock jenkins
+
 RUN curl -fsSL https://dl.k8s.io/release/v1.29.15/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl \
     && chmod +x /usr/local/bin/kubectl
 

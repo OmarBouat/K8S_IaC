@@ -23,7 +23,7 @@ A complete, production-ready infrastructure-as-code setup that creates a **4-nod
 - **Docker Engine** on tools VM for containerized services
 - **Dockerfiles + Compose** for Jenkins/Gitea/Nexus image and runtime definitions
 - **Jenkins**: CI/CD automation server
-- **Jenkinsfile pipeline** to auto-build and redeploy frontend container on code changes
+- **Frontend-repo Jenkinsfile pipeline** to auto-build and redeploy frontend container on code changes
 - Jenkins image includes the Docker CLI and host socket access for container builds
 - **Gitea**: Self-hosted Git repository server
 - **Nexus**: Artifact repository manager (Maven, Docker, npm, etc.)
@@ -144,6 +144,7 @@ All services run on the `tools` VM (`192.168.56.20`):
 | **Jenkins** | 8080 | `http://192.168.56.20:8080` | CI/CD server (pipelines, agents, jobs) |
 | **Gitea** | 3000 | `http://192.168.56.20:3000` | Git repository server |
 | **Nexus** | 8081 | `http://192.168.56.20:8081` | Package/artifact repository |
+| **Nexus Docker Registry** | 8082 | `http://192.168.56.20:8082` | Docker image registry |
 | **Frontend Demo** | 8090 | `http://192.168.56.20:8090` | Auto-redeployed demo website |
 | **NFS** | 2049 | `nfs://192.168.56.20:/srv/nfs/share` | Persistent shared storage |
 | **Docker** | 2375 | Via unix socket | Container runtime |
@@ -167,14 +168,7 @@ Ansible playbooks are modular under `ansible/playbooks/cluster/`:
 .
 ├── Vagrantfile              # VM definitions (4 VMs with specs)
 ├── Makefile                 # One-command management targets
-├── Jenkinsfile              # CI/CD pipeline definition (build + redeploy frontend)
 ├── README.md                # This file
-├── frontend/
-│   ├── Dockerfile
-│   ├── nginx.conf
-│   ├── index.html
-│   ├── styles.css
-│   └── app.js
 ├── scripts/
 │   ├── bootstrap.sh         # Base OS setup (all VMs)
 │   └── setup-tools.sh       # Tools VM Ansible prep
@@ -257,40 +251,47 @@ NFS clients are automatically configured on cluster nodes (`master`, `worker1`, 
 2. Get the initial admin password: `make logs-jenkins`
 3. Complete setup wizard and create your first pipeline job
 
-## Frontend CI/CD with Jenkins (GitHub Push -> Auto Redeploy)
+## Frontend CI/CD with Jenkins (Local Gitea -> Nexus Docker Registry)
 
-This repository includes:
+Frontend CI/CD is driven from the frontend application repository (`http://192.168.56.20:3000/OmarBouat/frontend-project.git`), which includes:
 
-- `frontend/`: simple static website
-- `frontend/Dockerfile`: image definition
-- `Jenkinsfile`: pipeline that builds and redeploys container `frontend-web` on port `8090`
+- app source files (`index.html`, `styles.css`, `app.js`, `nginx.conf`, `Dockerfile`)
+- `Jenkinsfile`: pipeline that builds, pushes to Nexus, and redeploys container `frontend-web` on port `8090`
 
 ### Pipeline behavior
 
-On each detected commit/push:
+On each detected commit/push in the local Gitea repo:
 
 1. Checkout repository
 2. Build `k8s-lab/frontend:latest` and `k8s-lab/frontend:<short_sha>`
-3. Replace running `frontend-web` container
-4. Run a health check against `http://127.0.0.1:8090/health`
+3. Push the image to Nexus as `192.168.56.20:8082/k8s-lab/frontend`
+4. Replace the running `frontend-web` container with the Nexus image
+5. Run a health check against `http://172.17.0.1:8090/health`
 
 ### Jenkins job setup (one-time)
 
 1. In Jenkins, create a **Pipeline** job.
 2. Choose **Pipeline script from SCM**.
 3. SCM: **Git**
-4. Repository URL: your GitHub repository URL.
+4. Repository URL: your local Gitea repository URL, for example `http://192.168.56.20:3000/<owner>/frontend.git`.
 5. Script Path: `Jenkinsfile`
 6. Save and run once.
 
-### Auto-trigger from GitHub
+### Auto-trigger from Gitea
 
 Use either option:
 
-- Preferred: add GitHub webhook to `http://<JENKINS_HOST>:8080/github-webhook/`
-- Fallback: polling is already enabled in `Jenkinsfile` every ~2 minutes
+- Preferred: add a Gitea webhook to Jenkins and point it at the job or use SCM polling.
+- Fallback: polling is enabled in the frontend repo `Jenkinsfile` every ~2 minutes
 
-> Note: If Jenkins is not publicly reachable from GitHub, webhook delivery will fail and polling will still keep deployments automated.
+> Note: If Jenkins is not reachable from Gitea, polling will still keep deployments automated.
+
+### Nexus Docker registry usage
+
+1. Open Nexus UI: `http://192.168.56.20:8081`
+2. The Ansible tools playbook creates the Docker hosted repository automatically on port `8082`
+3. Log in from the tools VM or Jenkins with `docker login 192.168.56.20:8082`
+4. Pull or push frontend images using `192.168.56.20:8082/k8s-lab/frontend:<tag>`
 
 ### Redeploy just services
 
