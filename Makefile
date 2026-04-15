@@ -1,6 +1,8 @@
 .PHONY: help up down status clean rerun deploy \
 	docker-build docker-up docker-down docker-ps \
 	frontend-build frontend-deploy frontend-logs frontend-health \
+        k8s-network-deploy k8s-network-status k8s-network-delete \
+        k8s-tools-deploy k8s-tools-delete k8s-tools-status \
         ssh-master ssh-worker1 ssh-worker2 ssh-tools \
 	logs-gitea logs-nexus logs-jenkins logs-docker \
 	test-connectivity test-services test-k8s test-nfs-mounts
@@ -30,6 +32,14 @@ help:
 	@echo "  frontend-deploy   Deploy/redeploy frontend container on tools VM"
 	@echo "  frontend-health   Check frontend health endpoint"
 	@echo "  frontend-logs     Show frontend container logs"
+	@echo ""
+	@echo "[Kubernetes app stack]"
+	@echo "  k8s-network-deploy  Install ingress-nginx + MetalLB (stable LoadBalancer IP)"
+	@echo "  k8s-network-status  Show ingress and MetalLB status"
+	@echo "  k8s-network-delete  Remove ingress-nginx + MetalLB resources"
+	@echo "  k8s-tools-deploy  Deploy Jenkins and frontend on Kubernetes"
+	@echo "  k8s-tools-delete  Remove Kubernetes app stack resources"
+	@echo "  k8s-tools-status  Show status of Kubernetes app stack"
 	@echo ""
 	@echo "[Deployment]"
 	@echo "  rerun             Re-run Ansible playbook only"
@@ -118,6 +128,55 @@ frontend-health:
 frontend-logs:
 	@echo "==> Frontend container logs"
 	vagrant ssh tools -c "docker logs frontend-web"
+
+k8s-network-deploy:
+	@echo "==> Installing ingress-nginx controller"
+	vagrant ssh master -c "kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml"
+	@echo "==> Waiting for ingress-nginx controller"
+	vagrant ssh master -c "kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=300s"
+	@echo "==> Relaxing ingress admission failure policy for this lab"
+	vagrant ssh master -c "kubectl patch validatingwebhookconfiguration ingress-nginx-admission --type json -p='[{\"op\":\"replace\",\"path\":\"/webhooks/0/failurePolicy\",\"value\":\"Ignore\"}]' || true"
+	@echo "==> Installing MetalLB"
+	vagrant ssh master -c "kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.8/config/manifests/metallb-native.yaml"
+	@echo "==> Waiting for MetalLB components"
+	vagrant ssh master -c "kubectl -n metallb-system rollout status deployment/controller --timeout=300s && kubectl -n metallb-system rollout status daemonset/speaker --timeout=300s"
+	@echo "==> Relaxing MetalLB webhook failure policy for this lab"
+	vagrant ssh master -c "kubectl patch validatingwebhookconfiguration metallb-webhook-configuration --type json -p='[{\"op\":\"replace\",\"path\":\"/webhooks/0/failurePolicy\",\"value\":\"Ignore\"},{\"op\":\"replace\",\"path\":\"/webhooks/1/failurePolicy\",\"value\":\"Ignore\"},{\"op\":\"replace\",\"path\":\"/webhooks/2/failurePolicy\",\"value\":\"Ignore\"},{\"op\":\"replace\",\"path\":\"/webhooks/3/failurePolicy\",\"value\":\"Ignore\"},{\"op\":\"replace\",\"path\":\"/webhooks/4/failurePolicy\",\"value\":\"Ignore\"},{\"op\":\"replace\",\"path\":\"/webhooks/5/failurePolicy\",\"value\":\"Ignore\"}]' || true"
+	@echo "==> Applying MetalLB address pool"
+	vagrant ssh master -c "kubectl apply -f /vagrant/k8s/network/10-metallb-config.yaml"
+	@echo "==> Setting stable LoadBalancer IP for ingress"
+	vagrant ssh master -c "kubectl -n ingress-nginx patch service ingress-nginx-controller --type merge -p '{\"spec\":{\"loadBalancerIP\":\"192.168.56.240\"}}'"
+	@echo "✓ Network stack ready. Frontend can be exposed on http://192.168.56.240"
+
+k8s-network-status:
+	@echo "==> ingress-nginx service"
+	vagrant ssh master -c "kubectl -n ingress-nginx get svc ingress-nginx-controller -o wide"
+	@echo ""
+	@echo "==> MetalLB resources"
+	vagrant ssh master -c "kubectl -n metallb-system get ipaddresspools,l2advertisements,pods"
+
+k8s-network-delete:
+	@echo "==> Removing MetalLB config"
+	vagrant ssh master -c "kubectl delete -f /vagrant/k8s/network/10-metallb-config.yaml --ignore-not-found"
+	@echo "==> Removing MetalLB"
+	vagrant ssh master -c "kubectl delete -f https://raw.githubusercontent.com/metallb/metallb/v0.14.8/config/manifests/metallb-native.yaml --ignore-not-found"
+	@echo "==> Removing ingress-nginx"
+	vagrant ssh master -c "kubectl delete -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml --ignore-not-found"
+	@echo "✓ Network stack removed"
+
+k8s-tools-deploy:
+	@echo "==> Deploying DevOps tools stack on Kubernetes"
+	vagrant ssh master -c "kubectl apply -f /vagrant/k8s/devops-stack"
+	@echo "✓ Jenkins + frontend deployed in namespace devops-tools"
+
+k8s-tools-delete:
+	@echo "==> Removing DevOps tools stack from Kubernetes"
+	vagrant ssh master -c "kubectl delete -f /vagrant/k8s/devops-stack --ignore-not-found"
+	@echo "✓ Kubernetes stack removed"
+
+k8s-tools-status:
+	@echo "==> Kubernetes DevOps stack status"
+	vagrant ssh master -c "kubectl -n devops-tools get pods,svc,deploy,pvc"
 
 ssh-master:
 	vagrant ssh master

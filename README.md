@@ -80,6 +80,14 @@ make frontend-deploy   # Deploy frontend container manually (optional)
 make frontend-health   # Check frontend health endpoint
 make frontend-logs     # Show frontend container logs
 
+# Kubernetes app stack (Jenkins + frontend)
+make k8s-network-deploy  # Install ingress-nginx + MetalLB with stable LoadBalancer IP
+make k8s-network-status  # Show ingress and MetalLB state
+make k8s-network-delete  # Remove network stack
+make k8s-tools-deploy  # Apply Kubernetes manifests under k8s/devops-stack
+make k8s-tools-status  # Show status in namespace devops-tools
+make k8s-tools-delete  # Remove the Kubernetes app stack
+
 # SSH Access
 make ssh-master        # SSH into master node
 make ssh-worker1       # SSH into worker1 node
@@ -126,6 +134,42 @@ Docker services are defined in source-controlled files under `docker/` and are d
 make docker-up
 ```
 
+## Deploy DevOps Stack On Kubernetes
+
+This repo includes Kubernetes manifests for running part of the tools stack on your cluster:
+
+- Jenkins
+- Frontend demo app
+
+Manifests location:
+
+- `k8s/devops-stack/00-namespace.yaml`
+- `k8s/devops-stack/01-storage.yaml`
+- `k8s/devops-stack/02-apps.yaml`
+
+The stack uses NFS-backed persistent storage from `192.168.56.20:/srv/nfs/share`.
+
+Deploy:
+
+```bash
+make k8s-tools-deploy
+make k8s-tools-status
+```
+
+Remove:
+
+```bash
+make k8s-tools-delete
+```
+
+Stable frontend endpoint (recommended):
+
+- `http://192.168.56.240` via ingress-nginx + MetalLB
+
+Legacy NodePort endpoint (optional fallback):
+
+- Jenkins: `30080`
+
 ## Cluster Architecture
 
 | Node | Hostname | IP | Role |
@@ -148,6 +192,12 @@ All services run on the `tools` VM (`192.168.56.20`):
 | **Frontend Demo** | 8090 | `http://192.168.56.20:8090` | Auto-redeployed demo website |
 | **NFS** | 2049 | `nfs://192.168.56.20:/srv/nfs/share` | Persistent shared storage |
 | **Docker** | 2375 | Via unix socket | Container runtime |
+
+Kubernetes frontend (ingress):
+
+- URL: `http://192.168.56.240`
+- Backend: `frontend` Service (`ClusterIP`) with multiple replicas
+- Entry: `ingress-nginx-controller` Service (`LoadBalancer`) backed by MetalLB
 
 ## Playbook Structure
 
@@ -181,6 +231,11 @@ Ansible playbooks are modular under `ansible/playbooks/cluster/`:
 │   │   └── Dockerfile
 │   └── nexus/
 │       └── Dockerfile
+├── k8s/
+│   └── devops-stack/
+│       ├── 00-namespace.yaml
+│       ├── 01-storage.yaml
+│       └── 02-apps.yaml
 ├── ansible/
 │   ├── ansible.cfg          # Ansible global config
 │   ├── inventory.ini        # Static inventory using shared VM SSH key
@@ -251,22 +306,23 @@ NFS clients are automatically configured on cluster nodes (`master`, `worker1`, 
 2. Get the initial admin password: `make logs-jenkins`
 3. Complete setup wizard and create your first pipeline job
 
-## Frontend CI/CD with Jenkins (Local Gitea -> Nexus Docker Registry)
+## Frontend CI/CD with Jenkins (Local Gitea -> Nexus Artifacts + Kubernetes Deployment)
 
 Frontend CI/CD is driven from the frontend application repository (`http://192.168.56.20:3000/OmarBouat/frontend-project.git`), which includes:
 
 - app source files (`index.html`, `styles.css`, `app.js`, `nginx.conf`, `Dockerfile`)
-- `Jenkinsfile`: pipeline that builds, pushes to Nexus, and redeploys container `frontend-web` on port `8090`
+- `Jenkinsfile`: pipeline that publishes a versioned frontend artifact to Nexus and deploys frontend files into Kubernetes (`devops-tools` namespace)
 
 ### Pipeline behavior
 
 On each detected commit/push in the local Gitea repo:
 
 1. Checkout repository
-2. Build `k8s-lab/frontend:latest` and `k8s-lab/frontend:<short_sha>`
-3. Push the image to Nexus as `192.168.56.20:8082/k8s-lab/frontend`
-4. Replace the running `frontend-web` container with the Nexus image
-5. Run a health check against `http://172.17.0.1:8090/health`
+2. Package frontend source files into a versioned artifact (`frontend-<short_sha>.tar.gz`)
+3. Publish the artifact to Nexus raw repository (`frontend-raw`)
+4. Generate/refresh ConfigMap `frontend-site` from frontend source files (`index.html`, `styles.css`, `app.js`)
+5. Restart Kubernetes deployment `frontend` in namespace `devops-tools`
+6. Wait for rollout completion and run smoke test via in-cluster service URL (`http://frontend.devops-tools.svc.cluster.local/`)
 
 ### Jenkins job setup (one-time)
 
@@ -292,6 +348,8 @@ Use either option:
 2. The Ansible tools playbook creates the Docker hosted repository automatically on port `8082`
 3. Log in from the tools VM or Jenkins with `docker login 192.168.56.20:8082`
 4. Pull or push frontend images using `192.168.56.20:8082/k8s-lab/frontend:<tag>`
+
+> Note: Nexus remains available on the tools VM for artifacts, while frontend runtime deployment is Kubernetes-native.
 
 ### Redeploy just services
 
