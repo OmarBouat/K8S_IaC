@@ -1,0 +1,259 @@
+---
+- name: Install Docker and NFS packages
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose
+      - nfs-kernel-server
+    state: present
+    update_cache: true
+
+- name: Try to install Docker Compose v2 plugin when available
+  ansible.builtin.apt:
+    name: docker-compose-plugin
+    state: present
+  failed_when: false
+  changed_when: false
+
+- name: Configure Docker insecure registry for Nexus
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "insecure-registries": ["192.168.56.20:8082"]
+      }
+    owner: root
+    group: root
+    mode: '0644'
+  register: docker_daemon_config
+
+- name: Ensure Docker systemd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Configure Docker to listen on the local Unix socket and a TCP endpoint for Jenkins
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/override.conf
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:2375
+    owner: root
+    group: root
+    mode: '0644'
+  register: docker_service_override
+
+- name: Ensure docker service is enabled and running
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Reload systemd after Docker service override changes
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: docker_daemon_config.changed or docker_service_override.changed
+
+- name: Restart Docker to apply registry configuration
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted
+  when: docker_daemon_config.changed or docker_service_override.changed
+
+- name: Ensure nfs-kernel-server service is enabled and running
+  ansible.builtin.systemd:
+    name: nfs-kernel-server
+    state: started
+    enabled: true
+
+- name: Add vagrant user to docker group
+  ansible.builtin.user:
+    name: vagrant
+    groups: docker
+    append: true
+
+- name: Create NFS export directory
+  ansible.builtin.file:
+    path: /srv/nfs/share
+    state: directory
+    owner: nobody
+    group: nogroup
+    mode: '0777'
+
+- name: Create PostgreSQL NFS directory
+  ansible.builtin.file:
+    path: /srv/nfs/share/postgres
+    state: directory
+    owner: nobody
+    group: nogroup
+    mode: '0777'
+
+- name: Configure NFS export
+  ansible.builtin.lineinfile:
+    path: /etc/exports
+    line: "/srv/nfs/share 192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)"
+    create: true
+  register: nfs_export
+
+- name: Reload NFS exports
+  ansible.builtin.command: exportfs -ra
+  changed_when: false
+  when: nfs_export.changed
+
+- name: Create Gitea data directory
+  ansible.builtin.file:
+    path: /opt/tools/gitea
+    state: directory
+    owner: vagrant
+    group: vagrant
+    mode: '0755'
+
+- name: Create Nexus data directory
+  ansible.builtin.file:
+    path: /opt/tools/nexus/data
+    state: directory
+    owner: '200'
+    group: '200'
+    mode: '0755'
+    recurse: true
+
+- name: Detect available compose command
+  ansible.builtin.shell: |
+    if docker compose version >/dev/null 2>&1; then
+      echo "docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+      echo "docker-compose"
+    else
+      echo "No compose command found" >&2
+      exit 1
+    fi
+  register: compose_cmd
+  changed_when: false
+
+- name: Remove existing service containers to avoid name conflicts
+  ansible.builtin.shell: |
+    for c in gitea nexus; do
+      docker rm -f "$c" 2>/dev/null || true
+    done
+  register: removed_conflicts
+  changed_when: removed_conflicts.stdout | trim | length > 0
+
+- name: Remove legacy compose-named containers to avoid recreate bug
+  ansible.builtin.shell: |
+    docker ps -aq \
+      --filter "name=_gitea$" \
+      --filter "name=_nexus$" \
+      | xargs -r docker rm -f
+  register: removed_legacy_compose
+  changed_when: removed_legacy_compose.stdout | trim | length > 0
+
+- name: Build and start Docker services from compose definition
+  ansible.builtin.shell: "{{ compose_cmd.stdout }} -f /vagrant/docker/docker-compose.tools.yml up -d --build"
+  args:
+    chdir: /vagrant/docker
+
+- name: Check whether the Jenkins image is already configured
+  ansible.builtin.stat:
+    path: /opt/tools/nexus/data/.jenkins-image-pushed
+  register: jenkins_image_marker
+
+- name: Check whether the Nexus Docker repository is already configured
+  ansible.builtin.stat:
+    path: /opt/tools/nexus/data/.frontend-docker-hosted-created
+  register: nexus_repo_marker
+
+- name: Wait for Nexus to become available
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8081
+    status_code: [200, 302]
+  register: nexus_ready
+  retries: 30
+  delay: 10
+  until: nexus_ready.status in [200, 302]
+  when: not nexus_repo_marker.stat.exists
+
+- name: Read Nexus admin password
+  ansible.builtin.slurp:
+    src: /opt/tools/nexus/data/admin.password
+  register: nexus_admin_password
+  when: not nexus_repo_marker.stat.exists
+
+- name: Create Docker hosted repository for frontend images
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8081/service/rest/v1/repositories/docker/hosted
+    method: POST
+    user: admin
+    password: "{{ nexus_admin_password.content | b64decode | trim }}"
+    force_basic_auth: true
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body:
+      name: frontend-docker-hosted
+      online: true
+      storage:
+        blobStoreName: default
+        strictContentTypeValidation: true
+        writePolicy: ALLOW
+      docker:
+        v1Enabled: false
+        forceBasicAuth: true
+        httpPort: 8082
+    status_code: [201, 204, 409]
+  failed_when: false
+  register: nexus_repo_create
+  when: not nexus_repo_marker.stat.exists
+
+- name: Mark the Nexus Docker repository as configured
+  ansible.builtin.file:
+    path: /opt/tools/nexus/data/.frontend-docker-hosted-created
+    state: touch
+  when: not nexus_repo_marker.stat.exists and (nexus_repo_create is not defined or nexus_repo_create.status in [201, 204, 409, 400])
+
+- name: Read Nexus admin password for image push
+  ansible.builtin.slurp:
+    src: /opt/tools/nexus/data/admin.password
+  register: nexus_admin_password_for_jenkins
+  when: not jenkins_image_marker.stat.exists
+
+- name: Wait for Nexus Docker registry to become available for Jenkins image push
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8082/v2/
+    method: GET
+    status_code: [200, 401]
+  register: nexus_docker_ready
+  retries: 30
+  delay: 5
+  until: nexus_docker_ready.status in [200, 401]
+  when: not jenkins_image_marker.stat.exists
+
+- name: Log in to Nexus Docker registry for Jenkins image push
+  ansible.builtin.shell: |
+    echo "{{ nexus_admin_password_for_jenkins.content | b64decode | trim }}" | docker login -u admin --password-stdin 192.168.56.20:8082
+  register: jenkins_registry_login
+  retries: 10
+  delay: 5
+  until: jenkins_registry_login.rc == 0
+  when: not jenkins_image_marker.stat.exists
+
+- name: Build Jenkins image for Kubernetes
+  ansible.builtin.shell: |
+    docker build -t 192.168.56.20:8082/k8s-jenkins:latest /vagrant/docker/jenkins
+  args:
+    chdir: /vagrant
+  when: not jenkins_image_marker.stat.exists
+
+- name: Push Jenkins image to Nexus
+  ansible.builtin.shell: |
+    docker push 192.168.56.20:8082/k8s-jenkins:latest
+  when: not jenkins_image_marker.stat.exists
+
+- name: Mark the Jenkins image as configured
+  ansible.builtin.file:
+    path: /opt/tools/nexus/data/.jenkins-image-pushed
+    state: touch
+  when: not jenkins_image_marker.stat.exists

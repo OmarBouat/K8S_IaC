@@ -1,0 +1,5 @@
+---
+- name: Join workers to control plane
+  ansible.builtin.command: "{{ hostvars[groups['k8s_master'][0]].join_command }}"
+  args:
+    creates: /etc/kubernetes/kubelet.conf
