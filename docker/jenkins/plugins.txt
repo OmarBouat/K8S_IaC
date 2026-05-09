@@ -7,3 +7,4 @@ credentials-binding
 pipeline-stage-view
 ssh-agent
 ansicolor
+gitea

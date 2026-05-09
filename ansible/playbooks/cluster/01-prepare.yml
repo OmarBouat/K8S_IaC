@@ -107,6 +107,34 @@
         regexp: 'SystemdCgroup = false'
         replace: 'SystemdCgroup = true'
 
+    - name: Ensure containerd registry config path is set
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'config_path = ""'
+        replace: 'config_path = "/etc/containerd/certs.d"'
+
+    - name: Ensure Nexus registry certs directory exists for containerd
+      ansible.builtin.file:
+        path: /etc/containerd/certs.d/192.168.56.20:8082
+        state: directory
+        mode: '0755'
+
+    - name: Configure containerd to use Nexus over HTTP
+      ansible.builtin.copy:
+        dest: /etc/containerd/certs.d/192.168.56.20:8082/hosts.toml
+        mode: '0644'
+        content: |
+          server = "http://192.168.56.20:8082"
+
+          [host."http://192.168.56.20:8082"]
+            capabilities = ["pull", "resolve", "push"]
+
+    - name: Remove legacy Nexus mirror block from containerd config
+      ansible.builtin.blockinfile:
+        path: /etc/containerd/config.toml
+        marker: "# {mark} ANSIBLE NEXUS REGISTRY"
+        state: absent
+
     - name: Restart and enable containerd
       ansible.builtin.systemd:
         name: containerd

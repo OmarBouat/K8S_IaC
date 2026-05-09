@@ -14,17 +14,16 @@ This project creates **4 Ubuntu Server VMs (headless on VirtualBox)**:
 
 # Kubernetes Lab with Vagrant + Ansible
 
-A complete, production-ready infrastructure-as-code setup that creates a **4-node Kubernetes cluster** (1 control-plane, 2 workers) plus a dedicated tools VM with **Jenkins**, **Gitea**, **Nexus**, and **NFS** for a complete DevOps environment.
+A complete, production-ready infrastructure-as-code setup that creates a **4-node Kubernetes cluster** (1 control-plane, 2 workers) plus a dedicated tools VM with **Gitea**, **Nexus**, and **NFS**, while **Jenkins runs on Kubernetes** as the primary CI/CD server.
 
 ## Features
 
 - **4 HeadlessUbuntu Server VMs** on VirtualBox with private networking
 - **Kubernetes v1.29** with containerd and Flannel CNI
 - **Docker Engine** on tools VM for containerized services
-- **Dockerfiles + Compose** for Jenkins/Gitea/Nexus image and runtime definitions
-- **Jenkins**: CI/CD automation server
-- **Frontend-repo Jenkinsfile pipeline** to auto-build and redeploy frontend container on code changes
-- Jenkins image includes the Docker CLI and host socket access for container builds
+- **Dockerfiles + Compose** for Gitea/Nexus image and runtime definitions
+- **Jenkins**: CI/CD automation server running in Kubernetes
+- **Full-stack Jenkins pipeline** to auto-build and redeploy frontend/backend containers on code changes
 - **Gitea**: Self-hosted Git repository server
 - **Nexus**: Artifact repository manager (Maven, Docker, npm, etc.)
 - **NFS**: Network file system for persistent shared storage
@@ -50,7 +49,7 @@ Then verify:
 
 ```bash
 make test-k8s       # Check Kubernetes cluster state
-make test-services  # Verify Gitea, Nexus, NFS availability
+make test-services  # Verify Jenkins readiness, Gitea, Nexus, frontend, and NFS availability
 ```
 
 ## Available Make Targets
@@ -69,16 +68,10 @@ make rerun             # Re-run Ansible playbook without VM changes
 make deploy            # Shortcut for 'up && rerun'
 
 # Docker Services (tools VM)
-make docker-build      # Build Jenkins/Gitea/Nexus images from docker/*/Dockerfile
+make docker-build      # Build Gitea/Nexus images from docker/*/Dockerfile
 make docker-up         # Start/update services via docker compose
 make docker-down       # Stop/remove services defined in compose
 make docker-ps         # Show compose service status
-
-# Frontend Demo App
-make frontend-build    # Build frontend image manually (optional)
-make frontend-deploy   # Deploy frontend container manually (optional)
-make frontend-health   # Check frontend health endpoint
-make frontend-logs     # Show frontend container logs
 
 # Kubernetes app stack (Jenkins + frontend)
 make k8s-network-deploy  # Install ingress-nginx + MetalLB with stable LoadBalancer IP
@@ -96,11 +89,11 @@ make ssh-tools         # SSH into tools VM
 
 # Diagnostics & Testing
 make test-connectivity # Ping all nodes from tools VM
-make test-services     # Check Jenkins, Gitea, Nexus, frontend, NFS reachability
+make test-services     # Check Jenkins readiness plus Gitea, Nexus, frontend, and NFS reachability
 make test-k8s          # Verify Kubernetes cluster health
 
 # Logs
-make logs-jenkins      # Show Jenkins container logs
+make logs-jenkins      # Show Jenkins pod logs
 make logs-gitea        # Show Gitea container logs
 make logs-nexus        # Show Nexus container logs
 make logs-docker       # Show all Docker container logs
@@ -136,16 +129,20 @@ make docker-up
 
 ## Deploy DevOps Stack On Kubernetes
 
-This repo includes Kubernetes manifests for running part of the tools stack on your cluster:
+This repo includes Kubernetes manifests for running the full-stack web app and tools stack on your cluster:
 
 - Jenkins
-- Frontend demo app
+- Frontend app
+- Backend API
+- PostgreSQL database
 
 Manifests location:
 
 - `k8s/devops-stack/00-namespace.yaml`
 - `k8s/devops-stack/01-storage.yaml`
 - `k8s/devops-stack/02-apps.yaml`
+- `k8s/devops-stack/03-database.yaml`
+- `k8s/devops-stack/04-backend.yaml`
 
 The stack uses NFS-backed persistent storage from `192.168.56.20:/srv/nfs/share`.
 
@@ -162,13 +159,9 @@ Remove:
 make k8s-tools-delete
 ```
 
-Stable frontend endpoint (recommended):
+Stable full-stack endpoint (recommended):
 
-- `http://192.168.56.240` via ingress-nginx + MetalLB
-
-Legacy NodePort endpoint (optional fallback):
-
-- Jenkins: `30080`
+- `http://frontend.192.168.56.240.nip.io`, `http://backend.192.168.56.240.nip.io`, and Jenkins at `http://192.168.56.240/jenkins` via ingress-nginx + MetalLB
 
 ## Cluster Architecture
 
@@ -181,23 +174,35 @@ Legacy NodePort endpoint (optional fallback):
 
 ## Services & Access
 
-All services run on the `tools` VM (`192.168.56.20`):
+Most shared services run on the `tools` VM (`192.168.56.20`); Jenkins runs on Kubernetes.
 
 | Service | Port | URL | Purpose |
 |---------|------|-----|---------|
-| **Jenkins** | 8080 | `http://192.168.56.20:8080` | CI/CD server (pipelines, agents, jobs) |
+| **Jenkins** | 8080 | `http://127.0.0.1:8080` via port-forward | CI/CD server (pipelines, agents, jobs) |
 | **Gitea** | 3000 | `http://192.168.56.20:3000` | Git repository server |
 | **Nexus** | 8081 | `http://192.168.56.20:8081` | Package/artifact repository |
 | **Nexus Docker Registry** | 8082 | `http://192.168.56.20:8082` | Docker image registry |
-| **Frontend Demo** | 8090 | `http://192.168.56.20:8090` | Auto-redeployed demo website |
+| **Frontend** | 80 | `http://frontend.192.168.56.240.nip.io` | Kubernetes ingress endpoint |
+| **Backend** | 80 | `http://backend.192.168.56.240.nip.io` | Kubernetes API ingress endpoint |
+| **Jenkins** | 80 | `http://192.168.56.240/jenkins` | Kubernetes ingress endpoint |
 | **NFS** | 2049 | `nfs://192.168.56.20:/srv/nfs/share` | Persistent shared storage |
-| **Docker** | 2375 | Via unix socket | Container runtime |
+| **Docker** | 2375 | `tcp://192.168.56.20:2375` | Tools VM Docker daemon used by Jenkins builds |
 
 Kubernetes frontend (ingress):
 
-- URL: `http://192.168.56.240`
+- URL: `http://frontend.192.168.56.240.nip.io`
 - Backend: `frontend` Service (`ClusterIP`) with multiple replicas
 - Entry: `ingress-nginx-controller` Service (`LoadBalancer`) backed by MetalLB
+
+Kubernetes backend (ingress):
+
+- URL: `http://backend.192.168.56.240.nip.io`
+- Paths: `/api` and `/health`
+- Backend: `backend` Service (`ClusterIP`)
+
+
+
+Jenkins builds use the Docker daemon on the tools VM instead of a Docker-in-Docker sidecar. The Jenkins pod points `DOCKER_HOST` at `tcp://192.168.56.20:2375`, while the tools VM Docker service is configured to keep the local Unix socket and expose the TCP listener for builds.
 
 ## Playbook Structure
 
@@ -207,7 +212,7 @@ Ansible playbooks are modular under `ansible/playbooks/cluster/`:
 - **02-init-master.yml**: Control plane initialization (kubeadm init, Flannel CNI)
 - **03-join-workers.yml**: Worker node join (kubeadm join)
 - **04-wait-ready.yml**: Wait for cluster readiness
-- **05-tools-services.yml**: Tools VM setup (Docker, NFS, Jenkins, Gitea, Nexus)
+- **05-tools-services.yml**: Tools VM setup (Docker, NFS, Gitea, Nexus)
 - **06-nfs-clients.yml**: NFS client setup and mount on cluster nodes
 
 `site.yml` orchestrates all 6 playbooks in sequence.
@@ -223,7 +228,7 @@ Ansible playbooks are modular under `ansible/playbooks/cluster/`:
 │   ├── bootstrap.sh         # Base OS setup (all VMs)
 │   └── setup-tools.sh       # Tools VM Ansible prep
 ├── docker/
-│   ├── docker-compose.tools.yml  # Compose stack for Jenkins + Gitea + Nexus
+│   ├── docker-compose.tools.yml  # Compose stack for Gitea + Nexus
 │   ├── jenkins/
 │   │   ├── Dockerfile
 │   │   └── plugins.txt
@@ -302,52 +307,71 @@ NFS clients are automatically configured on cluster nodes (`master`, `worker1`, 
 
 ### Access Jenkins
 
-1. Open browser: `http://192.168.56.20:8080`
+1. Open browser: `http://192.168.56.240/jenkins`
 2. Get the initial admin password: `make logs-jenkins`
 3. Complete setup wizard and create your first pipeline job
 
-## Frontend CI/CD with Jenkins (Local Gitea -> Nexus Artifacts + Kubernetes Deployment)
+## Full-Stack CI/CD with Jenkins
 
-Frontend CI/CD is driven from the frontend application repository (`http://192.168.56.20:3000/OmarBouat/frontend-project.git`), which includes:
+The Jenkins flow is centered on the full-stack web app and its Kubernetes deployment.
 
-- app source files (`index.html`, `styles.css`, `app.js`, `nginx.conf`, `Dockerfile`)
-- `Jenkinsfile`: pipeline that publishes a versioned frontend artifact to Nexus and deploys frontend files into Kubernetes (`devops-tools` namespace)
+- frontend React app source and Dockerfile
+- backend Express API source and Dockerfile
+- `Jenkinsfile`: pipeline that builds/pushes images to Nexus and deploys the Kubernetes stack
 
 ### Pipeline behavior
 
-On each detected commit/push in the local Gitea repo:
+On each detected commit/push in the app repository:
 
 1. Checkout repository
-2. Package frontend source files into a versioned artifact (`frontend-<short_sha>.tar.gz`)
-3. Publish the artifact to Nexus raw repository (`frontend-raw`)
-4. Generate/refresh ConfigMap `frontend-site` from frontend source files (`index.html`, `styles.css`, `app.js`)
-5. Restart Kubernetes deployment `frontend` in namespace `devops-tools`
-6. Wait for rollout completion and run smoke test via in-cluster service URL (`http://frontend.devops-tools.svc.cluster.local/`)
+2. Build frontend and backend container images
+3. Push both images to Nexus registry
+4. Apply or refresh Kubernetes manifests in `devops-tools`
+5. Wait for rollout completion and run smoke tests against `/health` and `/api/users`
 
-### Jenkins job setup (one-time)
+### Jenkins job setup
 
-1. In Jenkins, create a **Pipeline** job.
-2. Choose **Pipeline script from SCM**.
-3. SCM: **Git**
-4. Repository URL: your local Gitea repository URL, for example `http://192.168.56.20:3000/<owner>/frontend.git`.
-5. Script Path: `Jenkinsfile`
-6. Save and run once.
+Create two Jenkins Pipeline jobs manually in the Jenkins UI. The Jenkins pod uses the custom image built from `docker/jenkins/Dockerfile`, which includes Docker CLI and `kubectl`.
+
+Jobs to create:
+
+1. `k8s-frontend`
+  - Job type: **Pipeline**
+  - Definition: **Pipeline script from SCM**
+  - SCM: **Git**
+  - Repository URL: `http://192.168.56.20:3000/OmarBouat/k8s-frontend.git`
+  - Branch: `main`
+  - Script Path: `Jenkinsfile`
+
+2. `k8s-backend`
+  - Job type: **Pipeline**
+  - Definition: **Pipeline script from SCM**
+  - SCM: **Git**
+  - Repository URL: `http://192.168.56.20:3000/OmarBouat/k8s-backend.git`
+  - Branch: `main`
+  - Script Path: `Jenkinsfile`
 
 ### Auto-trigger from Gitea
 
 Use either option:
 
-- Preferred: add a Gitea webhook to Jenkins and point it at the job or use SCM polling.
-- Fallback: polling is enabled in the frontend repo `Jenkinsfile` every ~2 minutes
+- Preferred: add a Gitea webhook for each repo and point it to Jenkins.
+- Fallback: SCM polling is already enabled in each Jenkinsfile (`pollSCM('H/5 * * * *')`).
 
-> Note: If Jenkins is not reachable from Gitea, polling will still keep deployments automated.
+Recommended webhook target in Jenkins:
+
+- Frontend job: `http://192.168.56.240/jenkins/job/k8s-frontend/build?token=<token>`
+- Backend job: `http://192.168.56.240/jenkins/job/k8s-backend/build?token=<token>`
+
+> Note: If you prefer webhook-based triggering, create the jobs first, then add the webhook in each Gitea repo.
+> The tools playbook also builds and pushes `192.168.56.20:8082/k8s-jenkins:latest` before the Kubernetes manifests are applied.
 
 ### Nexus Docker registry usage
 
 1. Open Nexus UI: `http://192.168.56.20:8081`
 2. The Ansible tools playbook creates the Docker hosted repository automatically on port `8082`
 3. Log in from the tools VM or Jenkins with `docker login 192.168.56.20:8082`
-4. Pull or push frontend images using `192.168.56.20:8082/k8s-lab/frontend:<tag>`
+4. Pull or push full-stack images using `192.168.56.20:8082/k8s-frontend:<tag>` and `192.168.56.20:8082/k8s-backend:<tag>`
 
 > Note: Nexus remains available on the tools VM for artifacts, while frontend runtime deployment is Kubernetes-native.
 

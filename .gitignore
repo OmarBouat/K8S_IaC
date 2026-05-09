@@ -46,3 +46,8 @@ Thumbs.db
 *.key
 id_rsa*
 *.ppk
+
+
+#comments
+agent-actions-log.txt
+comment.txt

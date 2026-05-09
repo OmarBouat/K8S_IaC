@@ -1,6 +1,5 @@
 .PHONY: help up down status clean rerun deploy \
 	docker-build docker-up docker-down docker-ps \
-	frontend-build frontend-deploy frontend-logs frontend-health \
         k8s-network-deploy k8s-network-status k8s-network-delete \
         k8s-tools-deploy k8s-tools-delete k8s-tools-status \
         ssh-master ssh-worker1 ssh-worker2 ssh-tools \
@@ -22,22 +21,16 @@ help:
 	@echo "  status            Show VM power/status"
 	@echo ""
 	@echo "[Docker services on tools VM]"
-	@echo "  docker-build      Build Jenkins, Gitea, and Nexus images from Dockerfiles"
-	@echo "  docker-up         Start/update Jenkins, Gitea, and Nexus via docker compose"
+	@echo "  docker-build      Build Gitea and Nexus images from Dockerfiles"
+	@echo "  docker-up         Start/update Gitea and Nexus via docker compose"
 	@echo "  docker-down       Stop and remove services from compose file"
 	@echo "  docker-ps         Show docker compose service/container state"
-	@echo ""
-	@echo "[Frontend CI/CD demo app]"
-	@echo "  frontend-build    Build frontend Docker image locally on tools VM"
-	@echo "  frontend-deploy   Deploy/redeploy frontend container on tools VM"
-	@echo "  frontend-health   Check frontend health endpoint"
-	@echo "  frontend-logs     Show frontend container logs"
 	@echo ""
 	@echo "[Kubernetes app stack]"
 	@echo "  k8s-network-deploy  Install ingress-nginx + MetalLB (stable LoadBalancer IP)"
 	@echo "  k8s-network-status  Show ingress and MetalLB status"
 	@echo "  k8s-network-delete  Remove ingress-nginx + MetalLB resources"
-	@echo "  k8s-tools-deploy  Deploy Jenkins and frontend on Kubernetes"
+	@echo "  k8s-tools-deploy  Deploy full-stack app and Jenkins on Kubernetes"
 	@echo "  k8s-tools-delete  Remove Kubernetes app stack resources"
 	@echo "  k8s-tools-status  Show status of Kubernetes app stack"
 	@echo ""
@@ -56,7 +49,7 @@ help:
 	@echo "  test-services     Check Jenkins, Gitea, Nexus, frontend, and NFS ports"
 	@echo "  test-k8s          Show Kubernetes cluster health"
 	@echo "  test-nfs-mounts   Verify NFS mounts and fstab on cluster nodes"
-	@echo "  logs-jenkins      Show Jenkins container logs"
+	@echo "  logs-jenkins      Show Jenkins pod logs"
 	@echo "  logs-gitea        Show Gitea container logs"
 	@echo "  logs-nexus        Show Nexus container logs"
 	@echo "  logs-docker       Show Docker containers and follow logs"
@@ -111,24 +104,6 @@ docker-ps:
 	@echo "==> Docker compose service status"
 	vagrant ssh tools -c "cd /vagrant/docker && if docker compose version >/dev/null 2>&1; then docker compose -f docker-compose.tools.yml ps; else docker-compose -f docker-compose.tools.yml ps; fi"
 
-frontend-build:
-	@echo "==> Building frontend image"
-	vagrant ssh tools -c "cd /vagrant && if [ -f Dockerfile ]; then docker build -t k8s-lab/frontend:latest .; elif [ -f frontend/Dockerfile ]; then docker build -t k8s-lab/frontend:latest frontend; else echo 'No frontend Dockerfile found at /vagrant or /vagrant/frontend' >&2; exit 1; fi"
-	@echo "✓ Frontend image built"
-
-frontend-deploy:
-	@echo "==> Deploying frontend container"
-	vagrant ssh tools -c "docker rm -f frontend-web 2>/dev/null || true && docker run -d --name frontend-web --restart unless-stopped -p 8090:80 k8s-lab/frontend:latest"
-	@echo "✓ Frontend deployed at http://192.168.56.20:8090"
-
-frontend-health:
-	@echo "==> Checking frontend health"
-	vagrant ssh tools -c "curl -fsS http://127.0.0.1:8090/health && echo '' && echo '✓ Frontend is healthy'"
-
-frontend-logs:
-	@echo "==> Frontend container logs"
-	vagrant ssh tools -c "docker logs frontend-web"
-
 k8s-network-deploy:
 	@echo "==> Installing ingress-nginx controller"
 	vagrant ssh master -c "kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/cloud/deploy.yaml"
@@ -166,8 +141,10 @@ k8s-network-delete:
 
 k8s-tools-deploy:
 	@echo "==> Deploying DevOps tools stack on Kubernetes"
+	vagrant ssh master -c "kubectl apply -f /vagrant/k8s/devops-stack/00-namespace.yaml"
+	vagrant ssh master -c 'NEXUS_USER=$$(kubectl -n devops-tools get secret nexus-credentials -o jsonpath="{.data.username}" | base64 -d); NEXUS_PASS=$$(kubectl -n devops-tools get secret nexus-credentials -o jsonpath="{.data.password}" | base64 -d); kubectl -n devops-tools create secret docker-registry nexus-registry --docker-server=192.168.56.20:8082 --docker-username=$$NEXUS_USER --docker-password=$$NEXUS_PASS --dry-run=client -o yaml | kubectl apply -f -'
 	vagrant ssh master -c "kubectl apply -f /vagrant/k8s/devops-stack"
-	@echo "✓ Jenkins + frontend deployed in namespace devops-tools"
+	@echo "✓ Full-stack app + Jenkins deployed in namespace devops-tools"
 
 k8s-tools-delete:
 	@echo "==> Removing DevOps tools stack from Kubernetes"
@@ -196,10 +173,10 @@ test-connectivity:
 	@echo "✓ Connectivity test completed"
 
 test-services:
-	@echo "==> Testing service ports on tools node"
+	@echo "==> Testing service ports"
 	@echo ""
-	@echo "[Jenkins] port 8080"
-	vagrant ssh tools -c "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/192.168.56.20/8080' && echo '✓ Jenkins is reachable' || echo '✗ Jenkins is NOT reachable'"
+	@echo "[Jenkins] ingress status"
+	vagrant ssh tools -c "curl -fsS -I http://192.168.56.240/jenkins/login >/dev/null && echo '✓ Jenkins is ready' || echo '✗ Jenkins is NOT ready'"
 	@echo ""
 	@echo "[Gitea] port 3000"
 	vagrant ssh tools -c "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/192.168.56.20/3000' && echo '✓ Gitea is reachable' || echo '✗ Gitea is NOT reachable'"
@@ -210,8 +187,8 @@ test-services:
 	@echo "[Nexus Docker Registry] port 8082"
 	vagrant ssh tools -c "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/192.168.56.20/8082' && echo '✓ Nexus Docker registry is reachable' || echo '✗ Nexus Docker registry is NOT reachable'"
 	@echo ""
-	@echo "[Frontend] port 8090"
-	vagrant ssh tools -c "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/192.168.56.20/8090' && echo '✓ Frontend is reachable' || echo '✗ Frontend is NOT reachable (deploy once via Jenkins or make frontend-deploy)'"
+	@echo "[Frontend] ingress status"
+	vagrant ssh tools -c "curl -fsS -I http://192.168.56.240/ >/dev/null && echo '✓ Frontend is reachable' || echo '✗ Frontend is NOT reachable'"
 	@echo ""
 	@echo "[NFS] port 2049"
 	vagrant ssh tools -c "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/192.168.56.20/2049' && echo '✓ NFS is reachable' || echo '✗ NFS is NOT reachable'"
@@ -258,8 +235,8 @@ logs-nexus:
 	vagrant ssh tools -c "docker logs nexus"
 
 logs-jenkins:
-	@echo "==> Jenkins container logs"
-	vagrant ssh tools -c "docker logs jenkins"
+	@echo "==> Jenkins pod logs"
+	vagrant ssh master -c "kubectl -n devops-tools logs deploy/jenkins"
 
 logs-docker:
 	@echo "==> Docker containers"

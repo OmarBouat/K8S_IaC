@@ -1,0 +1,123 @@
+---
+# PostgreSQL Deployment for Full-Stack App
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: devops-tools
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # Important: recreate instead of rollingupdate for stateful apps
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+            - name: POSTGRES_DB
+              value: "appdb"
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U postgres
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U postgres
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-nfs-pvc
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: devops-tools
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+# Persistent Volume Claim for PostgreSQL (using NFS)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-nfs-pvc
+  namespace: devops-tools
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: postgres-nfs-pv
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Persistent Volume for PostgreSQL (NFS)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-nfs-pv
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  nfs:
+    server: 192.168.56.20
+    path: /srv/nfs/share/postgres
+---
+# Secret for PostgreSQL password
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: devops-tools
+type: Opaque
+data:
+  password: cG9zdGdyZXM=  # base64 encoded "postgres"
